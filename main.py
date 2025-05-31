@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
-from data import ModelNet40
+from data import ModelNet40, miniBRANCH
 from model import DCP
 from util import transform_point_cloud, npmat2euler
 import numpy as np
@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Part of the code is referred from: https://github.com/floodsung/LearningToCompare_FSL
 
 class IOStream:
@@ -71,12 +71,12 @@ def test_one_epoch(args, net, test_loader):
     eulers_ba = []
 
     for src, target, rotation_ab, translation_ab, rotation_ba, translation_ba, euler_ab, euler_ba in tqdm(test_loader):
-        src = src.cuda()
-        target = target.cuda()
-        rotation_ab = rotation_ab.cuda()
-        translation_ab = translation_ab.cuda()
-        rotation_ba = rotation_ba.cuda()
-        translation_ba = translation_ba.cuda()
+        src = src.to(DEVICE)
+        target = target.to(DEVICE)
+        rotation_ab = rotation_ab.to(DEVICE)
+        translation_ab = translation_ab.to(DEVICE)
+        rotation_ba = rotation_ba.to(DEVICE)
+        translation_ba = translation_ba.to(DEVICE)
 
         batch_size = src.size(0)
         num_examples += batch_size
@@ -100,7 +100,7 @@ def test_one_epoch(args, net, test_loader):
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
 
         ###########################
-        identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
+        identity = torch.eye(3).to(DEVICE).unsqueeze(0).repeat(batch_size, 1, 1)
         loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
                + F.mse_loss(translation_ab_pred, translation_ab)
         if args.cycle:
@@ -197,7 +197,7 @@ def train_one_epoch(args, net, train_loader, opt):
 
         transformed_target = transform_point_cloud(target, rotation_ba_pred, translation_ba_pred)
         ###########################
-        identity = torch.eye(3).cuda().unsqueeze(0).repeat(batch_size, 1, 1)
+        identity = torch.eye(3).to(DEVICE).unsqueeze(0).repeat(batch_size, 1, 1)
         loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
                + F.mse_loss(translation_ab_pred, translation_ab)
         if args.cycle:
@@ -564,7 +564,7 @@ def main():
                         help='Wheter to test on unseen category')
     parser.add_argument('--num_points', type=int, default=1024, metavar='N',
                         help='Num of points to use')
-    parser.add_argument('--dataset', type=str, default='modelnet40', choices=['modelnet40'], metavar='N',
+    parser.add_argument('--dataset', type=str, default='modelnet40', choices=['modelnet40', 'miniBRANCH'], metavar='N',
                         help='dataset to use')
     parser.add_argument('--factor', type=float, default=4, metavar='N',
                         help='Divided factor for rotations')
@@ -584,21 +584,45 @@ def main():
     textio.cprint(str(args))
 
     if args.dataset == 'modelnet40':
-        train_loader = DataLoader(
-            ModelNet40(num_points=args.num_points, partition='train', gaussian_noise=args.gaussian_noise,
-                       unseen=args.unseen, factor=args.factor),
-            batch_size=args.batch_size, shuffle=True, drop_last=True)
+        # train_loader = DataLoader(
+        #     ModelNet40(num_points=args.num_points, partition='train', gaussian_noise=args.gaussian_noise,
+        #                unseen=args.unseen, factor=args.factor),
+        #     batch_size=args.batch_size, shuffle=True, drop_last=True)
         test_loader = DataLoader(
             ModelNet40(num_points=args.num_points, partition='test', gaussian_noise=args.gaussian_noise,
                        unseen=args.unseen, factor=args.factor),
             batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+    elif args.dataset == 'miniBRANCH':
+        train_loader = DataLoader(
+            miniBRANCH(
+                
+                num_points=args.num_points,
+                factor=args.factor,
+                partition='train'
+            ),
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=True
+        )
+
+        test_loader = DataLoader(
+            miniBRANCH(
+    
+                num_points=args.num_points,
+                factor=args.factor,
+                partition='test'
+            ),
+            batch_size=args.test_batch_size,
+            shuffle=False,
+            drop_last=False
+        )
     else:
         raise Exception("not implemented")
 
     if args.model == 'dcp':
-        net = DCP(args).cuda()
+        net = DCP(args).to(DEVICE)
         if args.eval:
-            if args.model_path is '':
+            if args.model_path == '':
                 model_path = 'checkpoints' + '/' + args.exp_name + '/models/model.best.t7'
             else:
                 model_path = args.model_path
@@ -606,7 +630,7 @@ def main():
             if not os.path.exists(model_path):
                 print("can't find pretrained model")
                 return
-            net.load_state_dict(torch.load(model_path), strict=False)
+            net.load_state_dict(torch.load(model_path, map_location=DEVICE), strict=False)
         if torch.cuda.device_count() > 1:
             net = nn.DataParallel(net)
             print("Let's use", torch.cuda.device_count(), "GPUs!")
